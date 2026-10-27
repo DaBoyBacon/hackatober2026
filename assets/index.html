@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f3ee" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
+    <title>Refill Monitor</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥤</text></svg>" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body data-state="setup">
+    <div id="alert-banner" class="banner" hidden>
+      <div>
+        <strong id="alert-title">Refill needed</strong>
+        <span id="alert-text"></span>
+      </div>
+      <button id="snooze-btn" class="btn btn-ghost">Snooze</button>
+    </div>
+
+    <main class="wrap">
+      <header class="top">
+        <h1>Refill Monitor</h1>
+        <span id="conn" class="conn" data-on="false"><i></i><span>Connecting…</span></span>
+      </header>
+
+      <!-- Hero: the cup -->
+      <section class="hero card">
+        <svg class="cup" viewBox="0 0 160 200" aria-hidden="true">
+          <defs>
+            <clipPath id="cup-inside">
+              <path d="M30 26 L130 26 L118 182 Q117 188 111 188 L49 188 Q43 188 42 182 Z" />
+            </clipPath>
+          </defs>
+          <g clip-path="url(#cup-inside)">
+            <rect class="cup-bg" x="0" y="0" width="160" height="200" />
+            <g id="liquid" class="liquid" style="transform: translateY(162px)">
+              <path class="wave" d="M-80 0 Q-60 -6 -40 0 T0 0 T40 0 T80 0 T120 0 T160 0 T200 0 T240 0 V200 H-80 Z" />
+              <rect x="-80" y="0" width="320" height="200" />
+            </g>
+          </g>
+          <path class="cup-outline" d="M24 20 L136 20 L123 183 Q121 194 110 194 L50 194 Q39 194 37 183 Z" />
+          <line class="straw" x1="96" y1="4" x2="82" y2="150" />
+        </svg>
+
+        <div class="readout">
+          <div id="state-pill" class="pill">Setting up</div>
+          <div class="big"><span id="pct">—</span><small>%</small></div>
+          <p id="message" class="message">Connecting to the board…</p>
+          <dl class="stats">
+            <div><dt>Drink left</dt><dd id="liquid-g">—</dd></div>
+            <div><dt>Last fill</dt><dd id="full-g">—</dd></div>
+            <div><dt>On coaster</dt><dd id="scale-g">—</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <!-- History -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Last 15 minutes</h2>
+          <span class="hint" id="steady">—</span>
+        </div>
+        <svg id="spark" class="spark" viewBox="0 0 600 120" preserveAspectRatio="none" aria-label="Drink level over the last 15 minutes"></svg>
+      </section>
+
+      <!-- Setup -->
+      <section class="card" id="setup-card">
+        <div class="card-head">
+          <h2>Calibrate</h2>
+          <button id="reset-btn" class="btn btn-link">Start over</button>
+        </div>
+        <ol class="steps">
+          <li id="step-tare">
+            <div>
+              <b>Zero the coaster</b>
+              <p>Take everything off the coaster, then press Tare.</p>
+            </div>
+            <button class="btn" data-cmd="tare">Tare</button>
+          </li>
+          <li id="step-cal">
+            <div>
+              <b>Calibrate with a known weight</b>
+              <p>A sealed 500 ml water bottle ≈ 520 g, or use a kitchen scale.</p>
+              <label class="inline">
+                <input id="known-g" type="number" inputmode="decimal" min="1" step="1" value="500" />
+                <span>grams</span>
+              </label>
+            </div>
+            <button class="btn" id="cal-btn">Calibrate</button>
+          </li>
+          <li id="step-cup">
+            <div>
+              <b>Weigh your empty cup</b>
+              <p>Put the empty cup on the coaster and wait for “steady”.</p>
+            </div>
+            <button class="btn" data-cmd="set_cup">Set empty cup</button>
+          </li>
+        </ol>
+        <p class="raw">Raw reading: <code id="raw">—</code></p>
+      </section>
+
+      <!-- Settings -->
+      <section class="card">
+        <div class="card-head"><h2>Alerts</h2></div>
+        <form id="settings" class="grid">
+          <label>
+            <span>“Low” at</span>
+            <div class="inline"><input name="low_percent" type="number" min="1" max="90" step="1" /><span>% left</span></div>
+          </label>
+          <label>
+            <span>“Empty” below</span>
+            <div class="inline"><input name="empty_margin_g" type="number" min="0" step="1" /><span>g</span></div>
+          </label>
+          <label>
+            <span>Remind every</span>
+            <div class="inline"><input name="reminder_minutes" type="number" min="0" step="1" /><span>min</span></div>
+          </label>
+          <label>
+            <span>Lifted counts as gone after</span>
+            <div class="inline"><input name="lift_grace_s" type="number" min="5" step="5" /><span>s</span></div>
+          </label>
+          <label class="wide">
+            <span>Phone notification URL <em>(optional — ntfy topic or Discord webhook)</em></span>
+            <input name="notify_url" type="url" placeholder="https://ntfy.sh/your-secret-topic" autocomplete="off" />
+          </label>
+          <label class="check wide">
+            <input id="sound-toggle" type="checkbox" checked />
+            <span>Chime in this browser when the cup is empty</span>
+          </label>
+          <div class="actions wide">
+            <button type="submit" class="btn">Save</button>
+            <button type="button" class="btn btn-ghost" data-cmd="test_alert">Send test alert</button>
+          </div>
+        </form>
+      </section>
+
+      <footer class="foot">Arduino UNO Q · load-cell coaster · <span id="clock"></span></footer>
+    </main>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <script src="libs/socket.io.min.js"></script>
+    <script src="libs/arduino.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

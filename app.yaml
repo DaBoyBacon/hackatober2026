@@ -1,0 +1,8 @@
+name: Drink Refill Monitor
+icon: 🥤
+description: Weighs your cup on a load-cell coaster and tells you when your drink is running low or empty.
+ports:
+  - 7000
+
+bricks:
+  - arduino:web_ui
