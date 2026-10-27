@@ -57,6 +57,13 @@ body {
 h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
 h2 { font-size: 15px; font-weight: 600; margin: 0; }
 
+.top-right { display: flex; align-items: center; gap: 12px; }
+.badge {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+  padding: 3px 10px; border-radius: 999px;
+  border: 1px dashed var(--muted); color: var(--muted);
+}
+.badge[hidden] { display: none; }
 .conn { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--empty); }
 .conn[data-on="true"] i { background: var(--ok); }

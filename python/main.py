@@ -2,16 +2,24 @@
 
 Data flow:
     sketch.ino --Bridge.notify("hx711_sample", raw)--> on_sample() --queue--> loop()
+    or SimCoaster.advance() (no hardware)  ----------------------------------> loop()
     loop() -> DrinkMonitor.update() -> state/events
            -> Bridge.call("set_display", code, percent)   (LED matrix + RGB LED)
            -> Bridge.call("beep", n)                       (optional buzzer)
            -> WebUI "status" / "alert" messages            (dashboard on :7000)
            -> notifier.send(...)                           (optional phone push)
     LLM agents  --POST /mcp (MCP over HTTP)--> McpEndpoint -> agent_tools -> loop()
+    tools/coaster.py --POST /api/sim--> sim_command() -> SimCoaster   (demo control)
+
+Sensor source: "real" (HX711 via the sketch) or "sim" (the virtual coaster).
+With DRINK_SENSOR=auto (the default) the app uses the real load cell if it
+hears from it within a few seconds of starting, and the simulator otherwise.
+The simulator keeps its own calibration and intake log, so demo data never
+mixes with real data.
 
 Everything that touches the DrinkMonitor runs on the loop() thread; Bridge,
-WebUI and MCP callbacks only drop work onto a queue (MCP calls then wait for
-the result), so there are no locking puzzles.
+WebUI, MCP and simulator requests only drop work onto a queue (and wait for
+the result when they need one), so there are no locking puzzles.
 """
 
 from __future__ import annotations
@@ -32,17 +40,22 @@ from arduino.app_bricks.web_ui import WebUI
 from fastapi import Request, Response
 
 import notifier
-from agent_tools import INSTRUCTIONS, build_tools, iso
-from drink_monitor import DISPLAY_CODE, CalibrationError, DrinkMonitor, DrinkState, Settings
-from intake import IntakeLog
+from agent_tools import INSTRUCTIONS, build_tools, iso, status_dict
+from drink_monitor import (DISPLAY_CODE, HX711_SATURATED, CalibrationError, DrinkMonitor, DrinkState,
+                           Settings)
+from intake import IntakeLog, local_tz_offset_minutes
 from mcp_server import CallContext, McpEndpoint, ToolError
+from sim_coaster import (DEFAULT_CUP_G, SIM_COUNTS_PER_GRAM, SIM_OFFSET, SimCoaster, SimError,
+                         help_text)
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # ------------------------------------------------------------------ setup ---
 APP_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DRINK_DATA_DIR", APP_DIR / "data"))
 SETTINGS_FILE = DATA_DIR / "settings.json"
+SIM_SETTINGS_FILE = DATA_DIR / "settings.sim.json"
+SENSOR_MODE_FILE = DATA_DIR / "sensor_mode.txt"
 TOKEN_FILE = DATA_DIR / "mcp_token.txt"
 
 STATUS_PUSH_INTERVAL = 0.25   # s, max rate of dashboard updates
@@ -50,32 +63,54 @@ DISPLAY_HEARTBEAT = 5.0       # s, re-send display state so the MCU knows we're 
 HISTORY_SECONDS = 60 * 60     # kept for agents; the dashboard shows the last 15 min
 DASHBOARD_HISTORY_S = 15 * 60
 LOOP_SLEEP = 0.05
+AUTO_SIM_AFTER_S = 6.0        # auto mode: no load cell heard by then -> simulator
+REAL_SAMPLES_TO_SWITCH = 20   # auto mode: this many good real samples in a row -> real sensor
 LOGGED_EVENTS = ("cup_placed", "refilled", "low", "empty", "reminder", "cup_removed", "fault", "sensor_ok")
+SENSOR_MODES = ("auto", "real", "sim")
 
 
 def log(msg: str) -> None:
     print(f"[drink-monitor] {msg}", flush=True)
 
 
-def load_settings() -> Settings:
+def load_settings(path: Path, default: Settings) -> Settings:
     try:
-        with open(SETTINGS_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             settings = Settings.from_dict(json.load(f))
-        log(f"Loaded settings from {SETTINGS_FILE}")
+        log(f"Loaded settings from {path}")
         return settings
     except FileNotFoundError:
-        log("No saved settings yet — starting setup.")
+        pass
     except Exception as exc:
-        log(f"Could not read {SETTINGS_FILE} ({exc}); using defaults.")
-    return Settings()
+        log(f"Could not read {path} ({exc}); using defaults.")
+    return default
+
+
+def sim_default_settings() -> Settings:
+    """The virtual coaster comes pre-calibrated, so a demo works straight away."""
+    return Settings(tare_offset=SIM_OFFSET, counts_per_gram=SIM_COUNTS_PER_GRAM, cup_weight_g=DEFAULT_CUP_G)
 
 
 def save_settings(settings: Settings) -> None:
+    path = SIM_SETTINGS_FILE if settings is settings_sim else SETTINGS_FILE
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS_FILE.with_suffix(".tmp")
+    tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(settings.to_dict(), f, indent=2)
-    tmp.replace(SETTINGS_FILE)
+    tmp.replace(path)
+
+
+def load_sensor_mode() -> str:
+    env = os.environ.get("DRINK_SENSOR", "").strip().lower()
+    if env in SENSOR_MODES:
+        return env
+    try:
+        saved = SENSOR_MODE_FILE.read_text().strip().lower()
+        if saved in SENSOR_MODES:
+            return saved
+    except FileNotFoundError:
+        pass
+    return "auto"
 
 
 def load_or_create_token(regenerate: bool = False) -> str:
@@ -100,8 +135,20 @@ def load_or_create_token(regenerate: bool = False) -> str:
     return tok
 
 
-monitor = DrinkMonitor(load_settings())
-intake = IntakeLog(DATA_DIR / "intake.json")
+settings_real = load_settings(SETTINGS_FILE, Settings())
+settings_sim = load_settings(SIM_SETTINGS_FILE, sim_default_settings())
+intake_real = IntakeLog(DATA_DIR / "intake.json")
+intake_sim = IntakeLog(None)            # demo sips are kept in memory only
+sim = SimCoaster()
+
+sensor_mode = load_sensor_mode()        # what the user asked for: auto / real / sim
+source = "sim" if sensor_mode == "sim" else "real"   # what's feeding the monitor right now
+monitor = DrinkMonitor(settings_sim if source == "sim" else settings_real)
+intake = intake_sim if source == "sim" else intake_real
+sim.on_effect = lambda e: monitor.new_cup(e["cup_g"]) if e.get("type") == "new_cup" else None
+if settings_sim.cup_weight_g:
+    sim.cup_g = settings_sim.cup_weight_g   # keep the virtual cup and its calibration in step
+
 samples: "queue.SimpleQueue[tuple[str, float]]" = queue.SimpleQueue()
 commands: "queue.SimpleQueue[tuple[str, object, object]]" = queue.SimpleQueue()
 history: deque[tuple[float, float | None, str]] = deque(maxlen=HISTORY_SECONDS)
@@ -115,6 +162,11 @@ _last_display_sent = 0.0
 _last_history_t = 0.0
 _bridge_warned = False
 _loop_thread: int | None = None
+_started_at: float | None = None
+_real_seen = False                      # has the real load cell ever answered since boot?
+_real_streak = 0
+_last_real_sample = 0.0
+_last_sim_fault = 0.0
 
 
 # --------------------------------------------------------- Bridge (MCU) ---
@@ -166,6 +218,10 @@ def settings_payload() -> dict:
     return d
 
 
+def source_payload() -> dict:
+    return {"source": source, "mode": sensor_mode}
+
+
 def history_payload() -> list:
     cutoff = time.time() - DASHBOARD_HISTORY_S
     return [[round(t, 1), None if g is None else round(g, 1), st] for t, g, st in history if t >= cutoff]
@@ -173,17 +229,12 @@ def history_payload() -> list:
 
 def agent_info_payload() -> dict:
     return {"token": mcp_token, "path": "/mcp", "calls": list(agent_calls)[::-1][:8],
-            "today_g": intake.daily_totals(1, _local_offset())[-1]["grams"]}
-
-
-def _local_offset() -> int:
-    from intake import local_tz_offset_minutes
-    return local_tz_offset_minutes()
+            "today_g": intake.daily_totals(1, local_tz_offset_minutes())[-1]["grams"]}
 
 
 def handle_command(name: str, client, data) -> None:
     global mcp_token
-    if name == "__call__":                # work submitted by an MCP tool (see run_on_loop)
+    if name == "__call__":                # work submitted by another thread (see run_on_loop)
         fut, fn = client, data
         if fut.set_running_or_notify_cancel():
             try:
@@ -195,6 +246,7 @@ def handle_command(name: str, client, data) -> None:
     s = monitor.settings
     try:
         if name == "get_initial_state":
+            ui.send_message("source", source_payload(), client)
             ui.send_message("settings", settings_payload(), client)
             ui.send_message("history", history_payload(), client)
             ui.send_message("status", monitor.status().to_dict(), client)
@@ -268,6 +320,8 @@ def push_to_phone(title: str, msg: str, kind: str) -> bool:
     url = monitor.settings.notify_url
     if not url:
         return False
+    if source == "sim":
+        title = f"[demo] {title}"
 
     def result(ok: bool, detail: str):
         if not ok:
@@ -309,24 +363,128 @@ def handle_events(events: list[dict]) -> None:
             log("Load cell is responding again.")
 
 
+# ------------------------------------------------------ sensor source ---
+def switch_source(new: str, reason: str) -> None:
+    """Point the monitor at the real load cell or the simulator (loop thread only)."""
+    global source, intake
+    if new == source:
+        return
+    source = new
+    monitor.swap_settings(settings_sim if new == "sim" else settings_real)
+    intake = intake_sim if new == "sim" else intake_real
+    history.clear()
+    msg = f"{reason} — using the {'simulated' if new == 'sim' else 'real'} coaster."
+    log(msg)
+    log_event("sensor_source", source=new, reason=reason)
+    ui.send_message("source", source_payload())
+    ui.send_message("settings", settings_payload())
+    ui.send_message("history", [])
+    toast(msg, "info")
+
+
+def set_sensor_mode(mode: str) -> str:
+    global sensor_mode
+    sensor_mode = mode
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SENSOR_MODE_FILE.write_text(mode + "\n")
+    if mode == "sim":
+        switch_source("sim", "Simulator selected")
+    elif mode == "real":
+        switch_source("real", "Real load cell selected")
+    else:
+        live = time.time() - _last_real_sample < 2.0
+        switch_source("real" if live else "sim",
+                      "Auto mode: load cell is answering" if live else "Auto mode: no load cell found")
+    ui.send_message("source", source_payload())
+    return (f"Sensor mode is now '{mode}'; readings come from the "
+            f"{'simulated' if source == 'sim' else 'real'} coaster.")
+
+
+def handle_real_sample(raw: float) -> list[dict]:
+    global _real_seen, _real_streak, _last_real_sample
+    valid = abs(raw) < HX711_SATURATED
+    _real_streak = _real_streak + 1 if valid else 0
+    if valid:
+        _real_seen = True
+        _last_real_sample = time.time()
+    if source == "real":
+        return monitor.update(raw)
+    if sensor_mode == "auto" and _real_streak >= REAL_SAMPLES_TO_SWITCH:
+        switch_source("real", "Load cell detected")
+    return []
+
+
+def check_auto_switch(now: float) -> None:
+    # Only ever falls back to the simulator at start-up: if a real coaster stops
+    # answering mid-demo, that's a fault worth showing, not something to paper over.
+    if (sensor_mode == "auto" and source == "real" and not _real_seen
+            and _started_at is not None and now - _started_at >= AUTO_SIM_AFTER_S):
+        switch_source("sim", "No load cell found")
+
+
+def tick_simulator(now: float) -> list[dict]:
+    global _last_sim_fault
+    if source != "sim":
+        return []
+    events: list[dict] = []
+    for t, raw in sim.advance(now):
+        events += monitor.update(raw, t)
+    if sim.fault and now - _last_sim_fault >= 2.0:   # like the sketch's hx711_fault reports
+        events += monitor.report_fault(now)
+        _last_sim_fault = now
+    return events
+
+
+def sim_command(argv: list[str]) -> dict:
+    """Run one coaster-CLI command (loop thread only)."""
+    if not argv or argv[0] in ("status", "st"):
+        return sim_status("")
+    cmd = argv[0].lower()
+    if cmd == "mode":
+        if len(argv) != 2 or argv[1].lower() not in SENSOR_MODES:
+            raise SimError("Usage: mode <sim|real|auto>")
+        return sim_status(set_sensor_mode(argv[1].lower()))
+    if cmd in ("help", "?"):
+        return sim_status(help_text())
+    if source != "sim":
+        raise SimError("The board is reading the real load cell. Run `mode sim` to use the simulator.")
+    result = sim.command(argv)
+    out = sim_status(result["message"])
+    out["seconds"] = result.get("seconds", 0)
+    log(f"Simulator: {' '.join(argv)}")
+    return out
+
+
+def sim_status(message: str) -> dict:
+    notes = list(sim.log)
+    sim.log.clear()
+    return {
+        "ok": True,
+        "message": message,
+        "notes": notes,
+        "source": source,
+        "mode": sensor_mode,
+        "coaster": sim.describe() if source == "sim" else None,
+        "monitor": status_dict(AppHost()),
+    }
+
+
 # ------------------------------------------------------------ MCP host ---
 class AppHost:
     """What agent_tools needs from the running app."""
-    monitor = monitor
-    intake = intake
     events = event_log
     history = history
 
+    @property
+    def monitor(self):
+        return monitor
+
+    @property
+    def intake(self):
+        return intake
+
     def run_on_loop(self, fn, timeout: float = 3.0):
-        if threading.get_ident() == _loop_thread:
-            return fn()
-        fut: concurrent.futures.Future = concurrent.futures.Future()
-        commands.put(("__call__", fut, fn))
-        try:
-            return fut.result(timeout)
-        except concurrent.futures.TimeoutError:
-            fut.cancel()
-            raise ToolError("The board didn't answer in time. Is the app still running? Try again.")
+        return run_on_loop(fn, timeout)
 
     def save_settings(self) -> None:
         save_settings(monitor.settings)
@@ -343,6 +501,21 @@ class AppHost:
 
     def sensor_ok(self) -> bool:
         return monitor.state != DrinkState.FAULT
+
+    def simulated(self) -> bool:
+        return source == "sim"
+
+
+def run_on_loop(fn, timeout: float = 3.0):
+    if threading.get_ident() == _loop_thread:
+        return fn()
+    fut: concurrent.futures.Future = concurrent.futures.Future()
+    commands.put(("__call__", fut, fn))
+    try:
+        return fut.result(timeout)
+    except concurrent.futures.TimeoutError:
+        fut.cancel()
+        raise ToolError("The board didn't answer in time. Is the app still running? Try again.")
 
 
 def on_agent_call(tool: str, args: dict, ctx: CallContext, ok: bool) -> None:
@@ -372,6 +545,39 @@ for _m in ("POST", "GET", "DELETE"):
     ui.expose_api(_m, "/mcp", mcp_route)
 
 
+def _sim_http(method: str, headers: dict, body: bytes) -> tuple[int, dict]:
+    h = {k.lower(): v for k, v in headers.items()}
+    # Same browser-origin rule as /mcp, and JSON-only POSTs, so a random web page
+    # can't drive the simulator from someone's browser.
+    if not McpEndpoint._origin_ok(h.get("origin"), h.get("host")):
+        return 403, {"ok": False, "error": "Origin not allowed."}
+    argv: list[str] = []
+    if method == "POST":
+        if "application/json" not in h.get("content-type", ""):
+            return 415, {"ok": False, "error": "Send JSON: {\"argv\": [\"pour\", \"300\"]}"}
+        try:
+            payload = json.loads(body or b"{}")
+            argv = [str(a) for a in payload.get("argv", [])]
+        except (ValueError, AttributeError, TypeError):
+            return 400, {"ok": False, "error": "Body must be JSON like {\"argv\": [\"pour\", \"300\"]}"}
+    try:
+        return 200, run_on_loop(lambda: sim_command(argv))
+    except SimError as exc:
+        return 400, {"ok": False, "error": str(exc), "source": source, "mode": sensor_mode}
+    except ToolError as exc:
+        return 503, {"ok": False, "error": str(exc)}
+
+
+async def sim_route(request: Request) -> Response:
+    body = await request.body()
+    status, payload = await asyncio.to_thread(_sim_http, request.method, dict(request.headers), body)
+    return Response(content=json.dumps(payload), status_code=status, media_type="application/json")
+
+
+for _m in ("GET", "POST"):
+    ui.expose_api(_m, "/api/sim", sim_route)
+
+
 # --------------------------------------------------------------- loop ---
 def publish(now: float) -> None:
     global _last_push, _last_display, _last_display_sent, _last_history_t
@@ -394,8 +600,10 @@ def publish(now: float) -> None:
 
 
 def loop() -> None:
-    global _loop_thread
+    global _loop_thread, _started_at
     _loop_thread = threading.get_ident()
+    if _started_at is None:
+        _started_at = time.time()
     events: list[dict] = []
 
     # Drain everything the MCU sent since last time (normally 0-2 samples).
@@ -404,7 +612,10 @@ def loop() -> None:
             kind, value = samples.get_nowait()
         except queue.Empty:
             break
-        events += monitor.update(value) if kind == "sample" else monitor.report_fault()
+        if kind == "sample":
+            events += handle_real_sample(value)
+        elif source == "real":
+            events += monitor.report_fault()
 
     while True:
         try:
@@ -413,16 +624,19 @@ def loop() -> None:
             break
         handle_command(name, client, data)
 
+    now = time.time()
+    check_auto_switch(now)
+    events += tick_simulator(now)
     events += monitor.check_timeouts()
     handle_events(events)
-    now = time.time()
     publish(now)
-    intake.maybe_save(now)
+    intake_real.maybe_save(now)
     time.sleep(LOOP_SLEEP)
 
 
-log("Starting. Dashboard: http://<board-ip>:7000   Agents (MCP): http://<board-ip>:7000/mcp")
+log(f"Starting (sensor mode: {sensor_mode}). Dashboard: http://<board-ip>:7000   "
+    "Agents (MCP): http://<board-ip>:7000/mcp   Simulator: tools/coaster.py")
 try:
     App.run(user_loop=loop)
 finally:
-    intake.save()
+    intake_real.save()

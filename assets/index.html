@@ -21,7 +21,11 @@
     <main class="wrap">
       <header class="top">
         <h1>Refill Monitor</h1>
-        <span id="conn" class="conn" data-on="false"><i></i><span>Connecting…</span></span>
+        <div class="top-right">
+          <span id="source-badge" class="badge" hidden
+                title="No load cell: readings come from the built-in simulator. Drive it with tools/coaster.py.">Simulated coaster</span>
+          <span id="conn" class="conn" data-on="false"><i></i><span>Connecting…</span></span>
+        </div>
       </header>
 
       <!-- Hero: the cup -->

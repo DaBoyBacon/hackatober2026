@@ -271,6 +271,22 @@ class DrinkMonitor:
         self._grams.clear()
         self._reset_tracking()
 
+    def new_cup(self, cup_weight_g: float) -> None:
+        """A different, empty cup is now in use (simulator shortcut for "Set empty cup")."""
+        self.settings.cup_weight_g = cup_weight_g
+        self._grams.clear()
+        self._reset_tracking()
+
+    def swap_settings(self, settings: "Settings") -> None:
+        """Switch to another calibration (real sensor vs. simulator) and start fresh."""
+        self.settings = settings
+        self._raw.clear()
+        self._grams.clear()
+        self._last_sample_t = None
+        self._fault_since = None
+        self._last_refill_at = None
+        self._reset_tracking()
+
     def snooze(self) -> None:
         """Silence repeat reminders until the next refill."""
         self._snoozed = True
@@ -409,8 +425,10 @@ class DrinkMonitor:
         full = self._full_liquid_g
         liquid = self._liquid_g
         pct = None
-        if liquid is not None and full and full > 0:
-            pct = int(max(0, min(100, round(100 * liquid / full))))
+        if liquid is not None and full is not None:
+            # A cup that never held more than a splash counts as 0 %, not 100 %.
+            pct = 0 if full <= self.settings.empty_margin_g else \
+                int(max(0, min(100, round(100 * liquid / full))))
         stable, stable_g = self._stability(now) if self._grams else (False, None)
         grams_now = self._grams[-1][1] if self._grams else None
         self._last_status = Status(

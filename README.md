@@ -9,7 +9,6 @@ coaster and tells you when your drink is **running low** or **empty**.
   level, a 15-minute history, calibration steps and alert settings.
 - **On your phone (optional):** a push notification through [ntfy](https://ntfy.sh)
   or a Discord webhook when the cup runs dry, with reminders until you refill.
-
 - **For AI agents:** an [MCP](https://modelcontextprotocol.io) server at
   `http://<board-ip>:7000/mcp`, so Claude Code or any MCP-capable agent can ask
   "is my cup empty?", track how much you've drunk today, and nudge you.
@@ -17,6 +16,10 @@ coaster and tells you when your drink is **running low** or **empty**.
 It knows the difference between *empty* and *picked up for a sip*, and it spots
 refills automatically — whether you pour into the cup on the coaster or carry it
 to the kitchen and back.
+
+**No load cell yet?** The app runs on a bare UNO Q: it falls back to a built-in
+coaster simulator you drive from a terminal (`tools/coaster.py`). See
+[No hardware? Use the simulator](#no-hardware-use-the-simulator).
 
 ---
 
@@ -140,6 +143,69 @@ URL works too; any other URL receives a JSON POST `{title, message, event}`.
 
 ---
 
+## No hardware? Use the simulator
+
+Run the app on a bare UNO Q (or with the load cell unplugged). If the board
+hasn't heard from a load cell ~6 seconds after starting, it switches to a
+**virtual coaster** and says so: the dashboard shows a *Simulated coaster*
+badge, the log prints `No load cell found — using the simulated coaster`, and
+AI agents see `"simulated": true`.
+
+Everything else is real: the detection logic, the dashboard, the LED matrix and
+RGB LED, alerts, phone notifications (titled `[demo] …`) and the MCP tools all
+run on the simulated readings. The virtual coaster comes pre-calibrated, starts
+with a 300 g cup holding 350 g of drink, and keeps its own calibration
+(`data/settings.sim.json`) and intake log, so demo data never mixes with real data.
+
+### Driving it from a terminal
+
+`tools/coaster.py` is a single standard-library Python file. Run it on your
+laptop pointing at the board, or on the board itself over SSH.
+
+```bash
+export DRINK_BOARD=192.168.1.50          # your board's IP (or uno-q.local)
+
+python3 tools/coaster.py demo --wait     # ~1 min show: pour → sips → low → empty → refill
+python3 tools/coaster.py sip 40 --wait   # pick up, drink 40 g, put back, follow along
+python3 tools/coaster.py watch           # live status line (Ctrl-C to stop)
+python3 tools/coaster.py                 # interactive shell: type commands, `help`, `quit`
+```
+
+| Command | What happens on the virtual coaster |
+|---|---|
+| `pour [g] [s]` | Pour drink into the cup on the coaster (default 300 g over 3 s) |
+| `sip [g] [hold_s]` | Lift the cup, drink, set it back down (default 30 g, held 2 s) |
+| `straw [g] [s]` / `drain [s]` | Drink without lifting / finish the whole drink |
+| `lift` / `down` | Pick the cup up and hold it / put it back |
+| `refill [g] [away_s]` | Carry the cup away and come back with it filled |
+| `remove` / `place [cup_g]` | Take the cup away / put it back (with a weight: a new empty cup) |
+| `set <g>` | Teleport the drink level, no animation |
+| `weight <g>` | Put a calibration object on the coaster (`weight 0` removes it) — lets you demo the dashboard's calibration steps |
+| `fault [on\|off]` | Pretend the load cell is unplugged |
+| `noise <g>` | Sensor noise (default 0.4 g) |
+| `wait <s>` / `stop` | Queue a pause / cancel everything queued |
+| `demo [sip_g]` | The scripted one-minute show |
+| `status` / `help` | What the coaster and the monitor think / the full list |
+| `mode <sim\|real\|auto>` | Force the simulator, force the real load cell, or choose automatically (remembered across restarts) |
+
+Actions take real time (a sip lifts the cup for 2 s) and queue up, so you can
+type `pour 300`, `sip`, `sip`, `refill` back to back. `--wait` (or no `&` in the
+shell) follows along and prints each change the monitor sees. In the shell,
+end a command with `&` to get the prompt back immediately.
+
+### How the automatic choice works
+
+| `DRINK_SENSOR` / `mode` | Behaviour |
+|---|---|
+| `auto` (default) | Real load cell if it answers within ~6 s of start-up, simulator otherwise. If a load cell is plugged in later, it takes over. A load cell that stops answering mid-run shows *Sensor problem* — it never silently falls back to fake data. |
+| `real` | Always the load cell. |
+| `sim` | Always the simulator, even with a load cell attached. |
+
+The simulator endpoint (`/api/sim`) has the same trust level as the dashboard:
+anyone on your network can use it, but web pages on other sites can't.
+
+---
+
 ## Use it from an AI agent (MCP)
 
 The app serves an MCP endpoint from the same web server as the dashboard — no
@@ -233,19 +299,21 @@ drink-refill-monitor/
 │   ├── intake.py            How much was drunk, per hour/day
 │   ├── mcp_server.py        Dependency-free MCP endpoint (Streamable HTTP)
 │   ├── agent_tools.py       The six tools agents see
+│   ├── sim_coaster.py       The virtual coaster used when there's no load cell
 │   └── notifier.py          ntfy / Discord / generic webhook
 ├── assets/                  Dashboard (index.html, app.js, style.css, libs/)
-├── tests/                   Detection-logic, MCP protocol and tool tests
+├── tests/                   Detection-logic, simulator, MCP protocol and tool tests
 ├── tools/
-│   ├── simulate.py          Run a simulated drinking session — no board needed
+│   ├── coaster.py           CLI for the board's coaster simulator
+│   ├── simulate.py          Offline run of the detection logic — no board needed
 │   └── mcp_stdio_bridge.py  stdio ⇄ HTTP bridge for local-only MCP clients
-└── data/                    Created at runtime: settings.json, intake.json, mcp_token.txt
+└── data/                    Created at runtime: settings*.json, intake.json, mcp_token.txt, sensor_mode.txt
 ```
 
 ## Develop without the board
 
 ```bash
-python3 -m unittest discover -s tests -v   # 48 tests
+python3 -m unittest discover -s tests -v   # 60 tests
 python3 tools/simulate.py                  # timeline of a simulated session
 ```
 
@@ -275,5 +343,7 @@ t=  854.5s  total_drunk {'grams': 400.4}
 | Matrix shows a blinking `?` | Python isn't sending updates — the app is stopped or crashed; check `arduino-app-cli app logs … --follow` |
 | Bridge calls fail after editing the app | In the App Lab terminal: `arduino-app-cli system cleanup`, then restart the app |
 | No chime in the browser | Browsers only allow sound after you've clicked the page once |
+| Dashboard shows *Simulated coaster* but the load cell is wired | It wasn't heard at start-up. Check wiring, then `coaster.py mode auto` (or `mode real`) — or just restart the app |
+| `coaster.py` says it can't reach the board | Use the board's IP and the same network (a phone hotspot is the safe bet at events); the app must be running |
 | Agent gets 401 | Token is wrong or was regenerated; copy it again from the dashboard |
 | Agent can't connect at all | Use the board's IP (not a cloud connector), port 7000, path `/mcp`, and make sure the app is running |

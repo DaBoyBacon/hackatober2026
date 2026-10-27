@@ -39,6 +39,11 @@ ui.on_message('history', (h) => { history = h || []; lastHistoryT = history.leng
 ui.on_message('alert', showAlert);
 ui.on_message('toast', (t) => toast(t.text, t.kind));
 ui.on_message('agent_info', (a) => { agentInfo = a; renderAgent(); });
+ui.on_message('source', (s) => {
+  const badge = $('#source-badge');
+  badge.hidden = s.source !== 'sim';
+  badge.textContent = s.mode === 'sim' ? 'Simulator' : 'Simulated coaster';
+});
 
 function setConn(on) {
   const el = $('#conn');

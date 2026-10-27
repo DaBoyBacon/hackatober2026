@@ -26,6 +26,8 @@ and how much the user has drunk over time.
 - "percent_left" is relative to the last refill, not the cup's capacity.
 - Grams of drink ≈ millilitres for water, tea, coffee and most soft drinks.
 - "lifted" means the cup is in the user's hand right now (taking a sip), not empty.
+- If "simulated" is true, readings come from the built-in coaster simulator (a demo \
+without the load cell). Mention that when it matters.
 - nudge_drinker makes a sound and/or notification in the user's space; use it sparingly \
 and only when the user asked to be reminded or clearly benefits."""
 
@@ -41,6 +43,7 @@ class Host(Protocol):
     def nudge(self, beeps: int, message: str, push_to_phone: bool) -> bool: ...
     def log_event(self, type_: str, **detail) -> None: ...
     def sensor_ok(self) -> bool: ...
+    def simulated(self) -> bool: ...
 
 
 def iso(t: float | None) -> str | None:
@@ -84,6 +87,7 @@ def status_dict(host: Host, now: float | None = None) -> dict:
         "reminders_snoozed": st.snoozed,
         "setup_complete": s.is_scale_calibrated() and s.is_cup_calibrated(),
         "sensor_ok": host.sensor_ok() and st.state != DrinkState.FAULT,
+        "simulated": bool(getattr(host, "simulated", lambda: False)()),
         "as_of": iso(now),
     }
     return d
@@ -101,7 +105,8 @@ def _summary(st, mon, now) -> str:
     pct = f" ({st.percent}%)" if st.percent is not None else ""
     since = ""
     if mon.last_refill_at:
-        since = f", refilled {round((now - mon.last_refill_at) / 60)} min ago"
+        mins = round((now - mon.last_refill_at) / 60)
+        since = ", just refilled" if mins < 1 else f", refilled {mins} min ago"
     if state == DrinkState.EMPTY:
         mins = minutes_since(mon.empty_since, now)
         return f"The cup is empty and needs a refill (empty for {mins:.0f} min)." if mins is not None \
