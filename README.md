@@ -10,6 +10,10 @@ coaster and tells you when your drink is **running low** or **empty**.
 - **On your phone (optional):** a push notification through [ntfy](https://ntfy.sh)
   or a Discord webhook when the cup runs dry, with reminders until you refill.
 
+- **For AI agents:** an [MCP](https://modelcontextprotocol.io) server at
+  `http://<board-ip>:7000/mcp`, so Claude Code or any MCP-capable agent can ask
+  "is my cup empty?", track how much you've drunk today, and nudge you.
+
 It knows the difference between *empty* and *picked up for a sip*, and it spots
 refills automatically — whether you pour into the cup on the coaster or carry it
 to the kitchen and back.
@@ -136,6 +140,84 @@ URL works too; any other URL receives a JSON POST `{title, message, event}`.
 
 ---
 
+## Use it from an AI agent (MCP)
+
+The app serves an MCP endpoint from the same web server as the dashboard — no
+extra install, no extra port:
+
+```
+http://<board-ip>:7000/mcp          (Streamable HTTP, bearer token required)
+```
+
+Open the dashboard's **Connect an AI agent** card for the exact URL, the token
+(created on first run, stored in `data/mcp_token.txt`) and copy-ready config.
+
+### Tools
+
+| Tool | What the agent gets / does |
+|---|---|
+| `get_drink_status` | Live state (`ok` / `low` / `empty` / `lifted` / `no_cup` / …), grams and % left, last refill time, how long it's been empty, current drinking pace, and an estimate of minutes until empty. Includes a one-line `summary`. |
+| `get_drink_history` | Level over the last 1–60 min (≤ 60 points) plus events: refills, low/empty alerts, cup removed, snoozes, nudges. |
+| `get_intake_summary` | Grams drunk today, today by hour, and per-day totals for up to 30 days (in the user's time zone if the agent passes `utc_offset_minutes`). |
+| `snooze_refill_reminders` | Silences the repeating "still empty" reminder until the next refill. |
+| `update_alert_settings` | Changes the low %, empty grams and reminder interval. |
+| `nudge_drinker` | Beeps the coaster and shows a dashboard banner (optionally a phone push). Rate-limited to once a minute. |
+
+Read-only tools are annotated `readOnlyHint`, and the server sends
+instructions telling the model how to interpret the numbers (percent is of the
+last fill, grams ≈ ml, "lifted" ≠ empty). Every agent call shows up under
+**Recent agent activity** on the dashboard.
+
+### Connecting
+
+**Claude Code** (or any client that speaks Streamable HTTP):
+
+```bash
+claude mcp add --transport http drink-coaster http://192.168.1.50:7000/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Then ask things like *"how much water have I had today?"* or *"remind me to
+refill when my cup's empty"*.
+
+**Apps that only launch local (stdio) servers** — use the bundled bridge, which
+is a single standard-library Python file you can copy to any computer:
+
+```json
+{
+  "mcpServers": {
+    "drink-coaster": {
+      "command": "python3",
+      "args": ["/path/to/tools/mcp_stdio_bridge.py", "http://192.168.1.50:7000/mcp"],
+      "env": { "DRINK_MCP_TOKEN": "<token>" }
+    }
+  }
+}
+```
+
+**Agent frameworks** (OpenAI Agents SDK, LangChain via `langchain-mcp-adapters`,
+the MCP Python/TypeScript SDKs, …): point their Streamable HTTP MCP client at
+the URL above with an `Authorization: Bearer <token>` header.
+
+> Cloud-hosted connectors (e.g. adding a connector on claude.ai) run on the
+> provider's servers and can't reach a board on your home network. Use a local
+> agent, or expose the board through a tunnel you trust.
+
+### Protocol notes
+
+- Speaks both MCP eras: the stateless **2026-07-28** revision (`server/discover`,
+  per-request `_meta`, `Mcp-Method`/`Mcp-Name` header checks) and the
+  **2025-03-26 → 2025-11-25** handshake revisions (`initialize`, `ping`, batches).
+  Tested with the official MCP Python SDK 2.3 (both modes) and 1.30.
+- Plain JSON responses (no SSE), no sessions. `GET`/`DELETE` → 405.
+- Security: bearer token on every request; browser requests from other sites
+  are refused via `Origin` checks. The dashboard itself has no login, so anyone
+  who can open it on your network can read the token — treat your LAN as the
+  trust boundary. **New token** on the card revokes the old one. Set
+  `DRINK_MCP_TOKEN` in the environment to pin your own.
+
+---
+
 ## Project layout
 
 ```
@@ -146,19 +228,24 @@ drink-refill-monitor/
 │   ├── hx711_lite.h         Dependency-free HX711 driver
 │   └── sketch.yaml
 ├── python/
-│   ├── main.py              Linux: Bridge + WebUI glue, event loop, persistence
+│   ├── main.py              Linux: Bridge + WebUI + MCP glue, event loop, persistence
 │   ├── drink_monitor.py     Detection logic (pure Python, no Arduino imports)
+│   ├── intake.py            How much was drunk, per hour/day
+│   ├── mcp_server.py        Dependency-free MCP endpoint (Streamable HTTP)
+│   ├── agent_tools.py       The six tools agents see
 │   └── notifier.py          ntfy / Discord / generic webhook
 ├── assets/                  Dashboard (index.html, app.js, style.css, libs/)
-├── tests/                   Unit tests for the detection logic
-├── tools/simulate.py        Run a simulated drinking session — no board needed
-└── data/                    Created at runtime: settings.json
+├── tests/                   Detection-logic, MCP protocol and tool tests
+├── tools/
+│   ├── simulate.py          Run a simulated drinking session — no board needed
+│   └── mcp_stdio_bridge.py  stdio ⇄ HTTP bridge for local-only MCP clients
+└── data/                    Created at runtime: settings.json, intake.json, mcp_token.txt
 ```
 
 ## Develop without the board
 
 ```bash
-python3 -m unittest discover -s tests -v   # 21 tests
+python3 -m unittest discover -s tests -v   # 48 tests
 python3 tools/simulate.py                  # timeline of a simulated session
 ```
 
@@ -172,6 +259,7 @@ t=  515.0s  empty       {'message': 'Your drink is empty — time for a refill!'
 t=  635.0s  reminder    {'message': 'Still empty — grab a refill when you can.'}
 t=  750.9s  refilled    {'liquid_g': 380.1}
 t=  849.7s  cup_removed
+t=  854.5s  total_drunk {'grams': 400.4}
 ```
 
 ---
@@ -187,3 +275,5 @@ t=  849.7s  cup_removed
 | Matrix shows a blinking `?` | Python isn't sending updates — the app is stopped or crashed; check `arduino-app-cli app logs … --follow` |
 | Bridge calls fail after editing the app | In the App Lab terminal: `arduino-app-cli system cleanup`, then restart the app |
 | No chime in the browser | Browsers only allow sound after you've clicked the page once |
+| Agent gets 401 | Token is wrong or was regenerated; copy it again from the dashboard |
+| Agent can't connect at all | Use the board's IP (not a cloud connector), port 7000, path `/mcp`, and make sure the app is running |

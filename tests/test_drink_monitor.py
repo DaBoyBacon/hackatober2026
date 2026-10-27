@@ -220,7 +220,7 @@ class TestSimulation(unittest.TestCase):
     def test_full_session_story(self):
         import simulate
         kinds = [ev["type"] for _, ev in simulate.run()]
-        self.assertEqual(kinds, ["setup_done", "refilled", "low", "empty", "reminder", "refilled", "cup_removed"])
+        self.assertEqual(kinds, ["setup_done", "refilled", "low", "empty", "reminder", "refilled", "cup_removed", "total_drunk"])
 
 
 if __name__ == "__main__":

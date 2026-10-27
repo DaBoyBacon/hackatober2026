@@ -135,6 +135,43 @@
         </form>
       </section>
 
+      <!-- AI agents (MCP) -->
+      <section class="card" id="agent-card">
+        <div class="card-head">
+          <h2>Connect an AI agent</h2>
+          <span class="hint" id="agent-today"></span>
+        </div>
+        <p class="lede">Any MCP-compatible agent on your network can read the coaster and nudge you. Give it this address and token.</p>
+        <div class="kv">
+          <span>MCP endpoint</span>
+          <code id="mcp-url">—</code>
+          <button class="btn btn-ghost" data-copy="mcp-url">Copy</button>
+        </div>
+        <div class="kv">
+          <span>Bearer token</span>
+          <code id="mcp-token" data-secret="">••••••••••••</code>
+          <span class="btn-row">
+            <button class="btn btn-ghost" id="token-show">Show</button>
+            <button class="btn btn-ghost" data-copy="mcp-token">Copy</button>
+          </span>
+        </div>
+        <details class="snippet">
+          <summary>Claude Code command</summary>
+          <pre id="snippet-claude-code"></pre>
+          <button class="btn btn-ghost" data-copy="snippet-claude-code">Copy</button>
+        </details>
+        <details class="snippet">
+          <summary>Desktop apps that only run local servers (stdio bridge)</summary>
+          <pre id="snippet-stdio"></pre>
+          <button class="btn btn-ghost" data-copy="snippet-stdio">Copy</button>
+        </details>
+        <div class="card-head sub">
+          <h3>Recent agent activity</h3>
+          <button id="token-new" class="btn btn-link">New token</button>
+        </div>
+        <ul id="agent-calls" class="calls"><li class="muted">No agent has connected yet.</li></ul>
+      </section>
+
       <footer class="foot">Arduino UNO Q · load-cell coaster · <span id="clock"></span></footer>
     </main>
 

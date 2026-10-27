@@ -127,6 +127,7 @@ class DrinkMonitor:
 
     RAW_HISTORY = 15   # raw samples kept for tare/calibration averaging
     SPIKE_WINDOW = 5   # median filter length for single-sample glitches
+    SIP_MIN_G = 2.0    # smaller stable drops are treated as noise, not drinking
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
@@ -145,6 +146,8 @@ class DrinkMonitor:
         self._last_reminder: float | None = None
         self._snoozed = False
         self._last_status: Status | None = None
+        self._last_refill_at: float | None = None
+        self._counted_liquid_g: float | None = None
 
     # ------------------------------------------------------------ inputs ---
     def report_fault(self, now: float | None = None) -> list[dict]:
@@ -277,6 +280,15 @@ class DrinkMonitor:
     def state(self) -> DrinkState:
         return self._state
 
+    @property
+    def last_refill_at(self) -> float | None:
+        """When the cup was last filled (or first placed with drink in it)."""
+        return self._last_refill_at
+
+    @property
+    def empty_since(self) -> float | None:
+        return self._empty_since if self._state in (DrinkState.EMPTY, DrinkState.LIFTED) else None
+
     def status(self, now: float | None = None) -> Status:
         """Snapshot of the current state (recomputed, so it reflects snooze/calibration changes)."""
         if now is None:
@@ -308,19 +320,31 @@ class DrinkMonitor:
         self._last_stable_g = grams
         self._liquid_g = liquid
 
+        refilled = False
         if self._full_liquid_g is None:
             # First reading after placing a cup (or after recalibrating).
             self._full_liquid_g = liquid
             if liquid > s.empty_margin_g + s.hysteresis_g:
+                self._last_refill_at = now
                 events.append({"type": "cup_placed", "liquid_g": round(liquid, 1)})
         elif prev_stable is not None and grams - prev_stable >= s.refill_jump_g:
             # Poured in while on the coaster, or picked up, refilled and put back.
             # (_last_stable_g survives a short lift, so both cases land here.)
             self._full_liquid_g = liquid
             self._snoozed = False
+            self._last_refill_at = now
+            refilled = True
             events.append({"type": "refilled", "liquid_g": round(liquid, 1)})
         elif liquid > self._full_liquid_g:
             self._full_liquid_g = liquid   # small top-up or settling
+
+        # Intake accounting: every stable drop of a couple of grams is a sip.
+        if (self._counted_liquid_g is None or refilled
+                or liquid > self._counted_liquid_g + self.SIP_MIN_G):
+            self._counted_liquid_g = liquid
+        elif self._counted_liquid_g - liquid >= self.SIP_MIN_G:
+            events.append({"type": "drank", "grams": round(self._counted_liquid_g - liquid, 1)})
+            self._counted_liquid_g = liquid
 
         events += self._set_state(self._classify(liquid), now)
         return events
@@ -427,6 +451,7 @@ class DrinkMonitor:
         self._full_liquid_g = None
         self._liquid_g = None
         self._last_stable_g = None
+        self._counted_liquid_g = None
         self._lifted_at = None
         self._empty_since = None
         self._snoozed = False

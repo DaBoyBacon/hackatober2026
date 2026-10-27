@@ -21,6 +21,8 @@ let status = null;
 let history = [];        // [t, liquid_g|null, state]
 let lastHistoryT = 0;
 let lastFrac = 0;
+let agentInfo = null;
+let tokenRevealed = false;
 
 const ui = new WebUI();
 
@@ -36,6 +38,7 @@ ui.on_message('settings', (s) => { settings = s; renderSettings(); renderSteps()
 ui.on_message('history', (h) => { history = h || []; lastHistoryT = history.length ? history[history.length - 1][0] : 0; drawSpark(); });
 ui.on_message('alert', showAlert);
 ui.on_message('toast', (t) => toast(t.text, t.kind));
+ui.on_message('agent_info', (a) => { agentInfo = a; renderAgent(); });
 
 function setConn(on) {
   const el = $('#conn');
@@ -141,8 +144,10 @@ function showAlert(a) {
   clearTimeout(bannerTimer);
   if (a.type === 'refilled' || a.type === 'low' || a.test) {
     bannerTimer = setTimeout(hideBanner, 6000);
+  } else if (a.type === 'nudge') {
+    bannerTimer = setTimeout(hideBanner, 12000);
   }
-  if ((a.type === 'empty' || a.type === 'reminder') && $('#sound-toggle').checked) chime();
+  if (['empty', 'reminder', 'nudge'].includes(a.type) && $('#sound-toggle').checked) chime();
   if (a.type === 'empty' || a.type === 'reminder') flashTitle(a.title);
 }
 
@@ -240,6 +245,78 @@ function drawSpark() {
   }
   svg.innerHTML = out;
 }
+
+// ------------------------------------------------------------ agents ---
+function renderAgent() {
+  if (!agentInfo) return;
+  const url = `${location.protocol}//${location.host}${agentInfo.path}`;
+  const tok = agentInfo.token;
+  const shown = tokenRevealed ? tok : '•'.repeat(12);
+  setCode('#mcp-url', url, url);
+  setCode('#mcp-token', shown, tok);
+  $('#token-show').textContent = tokenRevealed ? 'Hide' : 'Show';
+
+  const cc = (t) => `claude mcp add --transport http drink-coaster ${url} \\\n  --header "Authorization: Bearer ${t}"`;
+  setCode('#snippet-claude-code', cc(shown), cc(tok));
+
+  const cfg = (t) => JSON.stringify({ mcpServers: { 'drink-coaster': {
+    command: 'python3',
+    args: ['/path/to/drink-refill-monitor/tools/mcp_stdio_bridge.py', url],
+    env: { DRINK_MCP_TOKEN: t },
+  } } }, null, 2);
+  setCode('#snippet-stdio', cfg(shown), cfg(tok));
+
+  $('#agent-today').textContent = agentInfo.today_g ? `${Math.round(agentInfo.today_g)} g drunk today` : '';
+
+  const list = $('#agent-calls');
+  list.innerHTML = '';
+  if (!agentInfo.calls.length) {
+    list.innerHTML = '<li class="muted">No agent has connected yet.</li>';
+    return;
+  }
+  for (const c of agentInfo.calls) {
+    const li = document.createElement('li');
+    const time = document.createElement('time');
+    time.textContent = new Date(c.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const what = document.createElement('span');
+    what.textContent = `${c.tool}${c.client ? ` · ${c.client}` : ''}`;
+    if (!c.ok) { what.classList.add('bad'); what.textContent += ' (error)'; }
+    li.append(time, what);
+    list.appendChild(li);
+  }
+}
+
+function setCode(sel, display, raw) {
+  const el = $(sel);
+  el.textContent = display;
+  el.dataset.raw = raw;
+}
+
+$('#token-show').addEventListener('click', () => { tokenRevealed = !tokenRevealed; renderAgent(); });
+$('#token-new').addEventListener('click', () => {
+  if (confirm('Create a new token? Agents using the old one will stop working until updated.')) {
+    ui.send_message('regenerate_token');
+  }
+});
+
+document.querySelectorAll('[data-copy]').forEach((btn) => btn.addEventListener('click', async () => {
+  const el = document.getElementById(btn.dataset.copy);
+  const text = el.dataset.raw || el.textContent;
+  try {
+    await navigator.clipboard.writeText(text);   // needs https or localhost
+  } catch {
+    // Plain-http fallback: copy via a temporary textarea.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch { /* ignore */ }
+    ta.remove();
+  }
+  toast('Copied.');
+}));
 
 // ------------------------------------------------------------- clock ---
 setInterval(() => { $('#clock').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }, 1000);

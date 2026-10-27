@@ -40,13 +40,16 @@ def run(verbose: bool = False) -> list[tuple[float, dict]]:
     mon = DrinkMonitor(settings)
     coaster = Coaster()
     timeline: list[tuple[float, dict]] = []
+    drank = [0.0]
     dt = 1.0 / SAMPLE_HZ
 
     def hold(grams: float, seconds: float, wobble: float = 0.0):
         for _ in range(int(seconds * SAMPLE_HZ)):
             g = grams + (coaster.rng.uniform(-wobble, wobble) if wobble else 0.0)
             for ev in mon.update(coaster.raw(g), coaster.t) + mon.check_timeouts(coaster.t):
-                if ev["type"] != "state" or verbose:
+                if ev["type"] == "drank":
+                    drank[0] += ev["grams"]
+                if ev["type"] not in ("state", "drank") or verbose:
                     timeline.append((coaster.t, ev))
             if verbose and int(coaster.t * SAMPLE_HZ) % (5 * SAMPLE_HZ) == 0:
                 st = mon.status()
@@ -90,6 +93,7 @@ def run(verbose: bool = False) -> list[tuple[float, dict]]:
 
     # --- take the cup away for good ---
     hold(0, settings.lift_grace_s + 5)
+    timeline.append((coaster.t, {"type": "total_drunk", "grams": round(drank[0], 1)}))
     return timeline
 
 
